@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: queueqr-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: queueqr
+    ports:
+      - "5432:5432"
+    volumes:
+      - queueqr_pgdata:/var/lib/postgresql/data
+
+volumes:
+  queueqr_pgdata:

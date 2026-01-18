@@ -1,0 +1,22 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Env files
+.env
+.env.*
+
+# Docker volumes/overrides
+**/docker-compose.override.yml
