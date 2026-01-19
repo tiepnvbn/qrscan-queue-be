@@ -341,6 +341,33 @@ public sealed class QueueService(
 
     private async Task<int> GetNextNumberAsync(Guid roomId, DateOnly serviceDate, DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
+        // When running against SQLite (local dev without Docker/Postgres), we can't use Npgsql-specific SQL.
+        // Use a normal EF Core read/update inside the existing transaction.
+        if (db.Database.ProviderName is null || !db.Database.ProviderName.Contains("Npgsql", StringComparison.OrdinalIgnoreCase))
+        {
+            var counter = await db.DailyCounters
+                .FirstOrDefaultAsync(x => x.RoomId == roomId && x.ServiceDate == serviceDate, cancellationToken);
+
+            if (counter is null)
+            {
+                counter = new DailyCounter
+                {
+                    RoomId = roomId,
+                    ServiceDate = serviceDate,
+                    NextNumber = 1,
+                    UpdatedAt = nowUtc,
+                };
+                db.DailyCounters.Add(counter);
+                await db.SaveChangesAsync(cancellationToken);
+                return counter.NextNumber;
+            }
+
+            counter.NextNumber += 1;
+            counter.UpdatedAt = nowUtc;
+            await db.SaveChangesAsync(cancellationToken);
+            return counter.NextNumber;
+        }
+
         const string sql = """
 INSERT INTO \"DailyCounters\" (\"RoomId\", \"ServiceDate\", \"NextNumber\", \"UpdatedAt\")
 VALUES (@roomId, @serviceDate, 1, @nowUtc)
@@ -366,6 +393,14 @@ RETURNING \"NextNumber\";
 
     private async Task<RoomStatusDto> BuildRoomStatusAsync(Room room, DateOnly serviceDate, DateTimeOffset now, CancellationToken cancellationToken)
     {
+        var lastIssued = await db.DailyCounters
+            .AsNoTracking()
+            .Where(x => x.RoomId == room.Id && x.ServiceDate == serviceDate)
+            .Select(x => (int?)x.NextNumber)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        var nextToTake = (lastIssued ?? 0) + 1;
+
         var current = await db.Tickets
             .AsNoTracking()
             .Where(x => x.RoomId == room.Id && x.ServiceDate == serviceDate && x.Status == TicketStatus.Serving)
@@ -392,6 +427,7 @@ RETURNING \"NextNumber\";
             room.ServiceMinutes <= 0 ? DefaultServiceMinutes : room.ServiceMinutes,
             current,
             next,
+            nextToTake,
             waitingCount,
             now
         );

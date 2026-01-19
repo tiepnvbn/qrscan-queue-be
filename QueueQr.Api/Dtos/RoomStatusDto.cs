@@ -8,6 +8,7 @@ public sealed record RoomStatusDto(
     int ServiceMinutes,
     int? CurrentNumber,
     int? NextNumber,
+    int NextToTakeNumber,
     int WaitingCount,
     DateTimeOffset Now
 );

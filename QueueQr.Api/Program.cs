@@ -24,8 +24,22 @@ builder.Services.AddSignalR();
 
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
-    var connectionString = builder.Configuration.GetConnectionString("Default");
-    options.UseNpgsql(connectionString);
+    var dbProvider = builder.Configuration["DbProvider"]
+        ?? Environment.GetEnvironmentVariable("QUEUEQR_DB_PROVIDER")
+        ?? "Postgres";
+
+    if (string.Equals(dbProvider, "Sqlite", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(dbProvider, "SQLite", StringComparison.OrdinalIgnoreCase))
+    {
+        var sqliteConnectionString = builder.Configuration.GetConnectionString("Sqlite")
+            ?? $"Data Source={Path.Combine(builder.Environment.ContentRootPath, "queueqr.db")}";
+        options.UseSqlite(sqliteConnectionString);
+    }
+    else
+    {
+        var connectionString = builder.Configuration.GetConnectionString("Default");
+        options.UseNpgsql(connectionString);
+    }
 });
 
 builder.Services.AddSingleton<IClock, AppClock>();

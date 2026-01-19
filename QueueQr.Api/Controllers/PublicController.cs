@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using QueueQr.Api.Data;
 using QueueQr.Api.Dtos;
 using QueueQr.Api.Services;
 
@@ -6,8 +8,28 @@ namespace QueueQr.Api.Controllers;
 
 [ApiController]
 [Route("api/public")]
-public sealed class PublicController(QueueService queue) : ControllerBase
+public sealed class PublicController(QueueService queue, AppDbContext db) : ControllerBase
 {
+    [HttpGet("sites")]
+    public async Task<ActionResult<IReadOnlyList<SiteCatalogDto>>> GetSites(CancellationToken cancellationToken)
+    {
+        var sites = await db.Sites
+            .AsNoTracking()
+            .Include(s => s.Rooms)
+            .OrderBy(s => s.Slug)
+            .ToListAsync(cancellationToken);
+
+        return Ok(sites.Select(s => new SiteCatalogDto(
+            s.Id,
+            s.Slug,
+            s.Name,
+            s.Rooms
+                .OrderBy(r => r.Slug)
+                .Select(r => new RoomCatalogDto(r.Id, r.Slug, r.Name, r.ServiceMinutes))
+                .ToList()
+        )).ToList());
+    }
+
     [HttpPost("customers/login")]
     public async Task<ActionResult<CustomerLoginResponse>> Login(
         [FromBody] CustomerLoginRequest request,
