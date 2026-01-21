@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: qrscan-queue-api
+    runtime: dotnet
+    plan: free
+    buildCommand: chmod +x build.sh && ./build.sh && dotnet publish QueueQr.Api/QueueQr.Api.csproj -c Release -o out
+    startCommand: dotnet out/QueueQr.Api.dll
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: QUEUEQR_DB_PROVIDER
+        value: Postgres
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+        # Set this to your Netlify URL after deployment, e.g.: https://your-app.netlify.app
+    healthCheckPath: /api/public/sites
+
+databases:
+  - name: qrscan-queue-db
+    databaseName: queueqr
+    plan: free
