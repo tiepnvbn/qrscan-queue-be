@@ -43,6 +43,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         modelBuilder.Entity<DailyCounter>(b =>
         {
             b.HasKey(x => new { x.RoomId, x.ServiceDate });
+            b.Property(x => x.CurrentShift).HasMaxLength(10).IsRequired();
             b.HasOne(x => x.Room)
                 .WithMany()
                 .HasForeignKey(x => x.RoomId)
@@ -53,6 +54,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             b.HasIndex(x => new { x.RoomId, x.ServiceDate, x.Number }).IsUnique();
             b.HasIndex(x => new { x.RoomId, x.ServiceDate, x.Status, x.Number });
+            b.Property(x => x.ShiftPrefix).HasMaxLength(10).IsRequired();
 
             b.HasOne(x => x.Room)
                 .WithMany(x => x.Tickets)

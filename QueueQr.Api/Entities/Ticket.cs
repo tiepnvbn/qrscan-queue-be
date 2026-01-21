@@ -9,6 +9,7 @@ public sealed class Ticket
 
     public DateOnly ServiceDate { get; set; }
     public int Number { get; set; }
+    public string ShiftPrefix { get; set; } = "A";
 
     public TicketStatus Status { get; set; } = TicketStatus.Waiting;
 

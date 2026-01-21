@@ -169,8 +169,7 @@ Client calls:
 - `JoinRoom(siteSlug, roomSlug)` (customer/staff)
 
 Events:
-- `roomUpdated` -> payload `RoomStatusResponse`
-- `siteUpdated` -> payload `SiteStatusDto`
+- `QueueUpdated` -> payload `{ siteSlug, roomSlug }` (clients should re-fetch via HTTP)
 
 ## Business rules
 - Queue number resets daily per room
@@ -185,6 +184,14 @@ Events:
 Target setup (suggested):
 - Render Web Service: run the API
 - Render PostgreSQL: managed Postgres
+
+Required environment variables (recommended):
+- `DATABASE_URL` (auto-provided when you attach Render Postgres)
+- `CORS_ALLOWED_ORIGINS=https://<your-netlify-site>.netlify.app` (comma-separated list allowed)
+
+Notes:
+- The API will bind to `PORT` (set by Render) automatically.
+- If `ConnectionStrings:Default` is not set, the API will fall back to `DATABASE_URL`.
 
 To finish before deploying:
 - Replace `EnsureCreated` with EF Core migrations

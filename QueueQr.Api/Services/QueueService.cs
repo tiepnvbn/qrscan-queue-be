@@ -1,6 +1,7 @@
 using System.Data;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Npgsql;
 using QueueQr.Api.Data;
 using QueueQr.Api.Dtos;
@@ -12,7 +13,8 @@ namespace QueueQr.Api.Services;
 public sealed class QueueService(
     AppDbContext db,
     IHubContext<QueueHub> hub,
-    IClock clock
+    IClock clock,
+    IMemoryCache cache
 )
 {
     private const int DefaultServiceMinutes = 10;
@@ -43,6 +45,30 @@ public sealed class QueueService(
             FreeCreditsFor(customer.Points),
             TierFor(customer.Points)
         );
+    }
+
+    private async Task<RoomStatusDto> BuildRoomStatusCachedAsync(Guid roomId, DateOnly serviceDate, DateTime nowLocal, CancellationToken cancellationToken)
+    {
+        var cacheKey = $"room_status_{roomId}_{serviceDate:yyyy-MM-dd}";
+        
+        if (cache.TryGetValue(cacheKey, out RoomStatusDto? cached))
+            return cached!;
+        
+        var room = await db.Rooms.FindAsync([roomId], cancellationToken);
+        if (room is null) throw new InvalidOperationException($"Room {roomId} not found");
+        
+        var status = await BuildRoomStatusAsync(room, serviceDate, nowLocal, cancellationToken);
+        
+        // Cache for 3 seconds to reduce DB load during high traffic
+        cache.Set(cacheKey, status, TimeSpan.FromSeconds(3));
+        
+        return status;
+    }
+
+    private void InvalidateRoomCache(Guid roomId, DateOnly serviceDate)
+    {
+        var cacheKey = $"room_status_{roomId}_{serviceDate:yyyy-MM-dd}";
+        cache.Remove(cacheKey);
     }
 
     public async Task<RoomStatusResponse> GetRoomStatusAsync(
@@ -76,16 +102,22 @@ public sealed class QueueService(
         var nowUtc = clock.UtcNow;
         var nowLocal = clock.NowLocal;
         var serviceDate = clock.TodayLocal;
+        var currentTime = TimeOnly.FromDateTime(nowLocal.DateTime);
+
+        // Calculate current shift
+        var resetTimes = ShiftCalculator.ParseShiftResetTimes(room.ShiftResetTimes);
+        var currentShift = ShiftCalculator.GetCurrentShiftPrefix(currentTime, resetTimes);
 
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
 
-        var nextNumber = await GetNextNumberAsync(room.Id, serviceDate, nowUtc, cancellationToken);
+        var nextNumber = await GetNextNumberAsync(room.Id, serviceDate, currentShift, nowUtc, cancellationToken);
 
         var ticket = new Ticket
         {
             RoomId = room.Id,
             ServiceDate = serviceDate,
             Number = nextNumber,
+            ShiftPrefix = currentShift,
             Status = TicketStatus.Waiting,
             CustomerId = request.CustomerId,
             CreatedAt = nowUtc,
@@ -96,6 +128,7 @@ public sealed class QueueService(
 
         await tx.CommitAsync(cancellationToken);
 
+        InvalidateRoomCache(room.Id, serviceDate);
         var status = await BuildRoomStatusAsync(room, serviceDate, nowLocal, cancellationToken);
         var myTicket = await BuildMyTicketAsync(room.Id, serviceDate, ticket.Id, nowLocal, room.ServiceMinutes, cancellationToken);
 
@@ -127,6 +160,7 @@ public sealed class QueueService(
                 next.Status = TicketStatus.Serving;
                 next.CalledAt = nowUtc;
                 await db.SaveChangesAsync(cancellationToken);
+                InvalidateRoomCache(room.Id, serviceDate);
             }
         }
 
@@ -339,7 +373,7 @@ public sealed class QueueService(
         return room;
     }
 
-    private async Task<int> GetNextNumberAsync(Guid roomId, DateOnly serviceDate, DateTimeOffset nowUtc, CancellationToken cancellationToken)
+    private async Task<int> GetNextNumberAsync(Guid roomId, DateOnly serviceDate, string currentShift, DateTimeOffset nowUtc, CancellationToken cancellationToken)
     {
         // When running against SQLite (local dev without Docker/Postgres), we can't use Npgsql-specific SQL.
         // Use a normal EF Core read/update inside the existing transaction.
@@ -354,6 +388,7 @@ public sealed class QueueService(
                 {
                     RoomId = roomId,
                     ServiceDate = serviceDate,
+                    CurrentShift = currentShift,
                     NextNumber = 1,
                     UpdatedAt = nowUtc,
                 };
@@ -362,18 +397,39 @@ public sealed class QueueService(
                 return counter.NextNumber;
             }
 
+            // Check if shift has changed - if so, reset to 1
+            if (counter.CurrentShift != currentShift)
+            {
+                counter.CurrentShift = currentShift;
+                counter.NextNumber = 1;
+                counter.UpdatedAt = nowUtc;
+                await db.SaveChangesAsync(cancellationToken);
+                return counter.NextNumber;
+            }
+
+            // Same shift, increment
             counter.NextNumber += 1;
             counter.UpdatedAt = nowUtc;
             await db.SaveChangesAsync(cancellationToken);
             return counter.NextNumber;
         }
 
+        // Postgres version with shift logic
         const string sql = """
-INSERT INTO \"DailyCounters\" (\"RoomId\", \"ServiceDate\", \"NextNumber\", \"UpdatedAt\")
-VALUES (@roomId, @serviceDate, 1, @nowUtc)
-ON CONFLICT (\"RoomId\", \"ServiceDate\")
-DO UPDATE SET \"NextNumber\" = \"DailyCounters\".\"NextNumber\" + 1, \"UpdatedAt\" = @nowUtc
-RETURNING \"NextNumber\";
+INSERT INTO "DailyCounters" ("RoomId", "ServiceDate", "CurrentShift", "NextNumber", "UpdatedAt")
+VALUES (@roomId, @serviceDate, @currentShift, 1, @nowUtc)
+ON CONFLICT ("RoomId", "ServiceDate")
+DO UPDATE SET 
+    "CurrentShift" = CASE 
+        WHEN "DailyCounters"."CurrentShift" = @currentShift THEN "DailyCounters"."CurrentShift"
+        ELSE @currentShift
+    END,
+    "NextNumber" = CASE 
+        WHEN "DailyCounters"."CurrentShift" = @currentShift THEN "DailyCounters"."NextNumber" + 1
+        ELSE 1
+    END,
+    "UpdatedAt" = @nowUtc
+RETURNING "NextNumber";
 """;
 
         var connection = (NpgsqlConnection)db.Database.GetDbConnection();
@@ -385,6 +441,7 @@ RETURNING \"NextNumber\";
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("roomId", roomId);
         cmd.Parameters.AddWithValue("serviceDate", serviceDate);
+        cmd.Parameters.AddWithValue("currentShift", currentShift);
         cmd.Parameters.AddWithValue("nowUtc", nowUtc);
 
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -393,27 +450,52 @@ RETURNING \"NextNumber\";
 
     private async Task<RoomStatusDto> BuildRoomStatusAsync(Room room, DateOnly serviceDate, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var lastIssued = await db.DailyCounters
+        var currentTime = TimeOnly.FromDateTime(now.DateTime);
+        var resetTimes = ShiftCalculator.ParseShiftResetTimes(room.ShiftResetTimes);
+        var currentShift = ShiftCalculator.GetCurrentShiftPrefix(currentTime, resetTimes);
+
+        var counter = await db.DailyCounters
             .AsNoTracking()
-            .Where(x => x.RoomId == room.Id && x.ServiceDate == serviceDate)
-            .Select(x => (int?)x.NextNumber)
-            .FirstOrDefaultAsync(cancellationToken);
+            .FirstOrDefaultAsync(x => x.RoomId == room.Id && x.ServiceDate == serviceDate, cancellationToken);
 
-        var nextToTake = (lastIssued ?? 0) + 1;
+        int nextToTakeNumber;
+        string nextToTakeDisplayNumber;
 
-        var current = await db.Tickets
+        if (counter is null || counter.CurrentShift != currentShift)
+        {
+            // New shift, start from 1
+            nextToTakeNumber = 1;
+            nextToTakeDisplayNumber = ShiftCalculator.FormatTicketNumber(currentShift, 1);
+        }
+        else
+        {
+            nextToTakeNumber = counter.NextNumber + 1;
+            nextToTakeDisplayNumber = ShiftCalculator.FormatTicketNumber(currentShift, nextToTakeNumber);
+        }
+
+        var currentTicket = await db.Tickets
             .AsNoTracking()
             .Where(x => x.RoomId == room.Id && x.ServiceDate == serviceDate && x.Status == TicketStatus.Serving)
             .OrderBy(x => x.Number)
-            .Select(x => (int?)x.Number)
+            .Select(x => new { x.Number, x.ShiftPrefix })
             .FirstOrDefaultAsync(cancellationToken);
 
-        var next = await db.Tickets
+        int? currentNumber = currentTicket?.Number;
+        string? currentDisplayNumber = currentTicket is not null 
+            ? ShiftCalculator.FormatTicketNumber(currentTicket.ShiftPrefix, currentTicket.Number)
+            : null;
+
+        var nextTicket = await db.Tickets
             .AsNoTracking()
             .Where(x => x.RoomId == room.Id && x.ServiceDate == serviceDate && x.Status == TicketStatus.Waiting)
             .OrderBy(x => x.Number)
-            .Select(x => (int?)x.Number)
+            .Select(x => new { x.Number, x.ShiftPrefix })
             .FirstOrDefaultAsync(cancellationToken);
+
+        int? nextNumber = nextTicket?.Number;
+        string? nextDisplayNumber = nextTicket is not null
+            ? ShiftCalculator.FormatTicketNumber(nextTicket.ShiftPrefix, nextTicket.Number)
+            : null;
 
         var waitingCount = await db.Tickets
             .AsNoTracking()
@@ -425,9 +507,12 @@ RETURNING \"NextNumber\";
             room.Name,
             serviceDate,
             room.ServiceMinutes <= 0 ? DefaultServiceMinutes : room.ServiceMinutes,
-            current,
-            next,
-            nextToTake,
+            currentNumber,
+            currentDisplayNumber,
+            nextNumber,
+            nextDisplayNumber,
+            nextToTakeNumber,
+            nextToTakeDisplayNumber,
             waitingCount,
             now
         );
@@ -450,9 +535,11 @@ RETURNING \"NextNumber\";
             return null;
         }
 
+        var displayNumber = ShiftCalculator.FormatTicketNumber(ticket.ShiftPrefix, ticket.Number);
+
         if (ticket.Status is TicketStatus.Completed or TicketStatus.Skipped)
         {
-            return new MyTicketDto(ticket.Id, ticket.Number, ticket.Status.ToString(), 0, 0, now);
+            return new MyTicketDto(ticket.Id, ticket.Number, displayNumber, ticket.Status.ToString(), 0, 0, now);
         }
 
         var aheadCount = await db.Tickets
@@ -467,15 +554,17 @@ RETURNING \"NextNumber\";
         var estimatedWaitMinutes = Math.Max(0, aheadCount * Math.Max(1, serviceMinutes));
         var estimatedServeTime = now.AddMinutes(estimatedWaitMinutes);
 
-        return new MyTicketDto(ticket.Id, ticket.Number, ticket.Status.ToString(), aheadCount, estimatedWaitMinutes, estimatedServeTime);
+        return new MyTicketDto(ticket.Id, ticket.Number, displayNumber, ticket.Status.ToString(), aheadCount, estimatedWaitMinutes, estimatedServeTime);
     }
 
     private async Task BroadcastRoomUpdateAsync(string siteSlug, string roomSlug, CancellationToken cancellationToken)
     {
+        Console.WriteLine($"[SignalR] Broadcasting to site:{siteSlug} and room:{siteSlug}:{roomSlug}");
         // Keep it simple: broadcast a lightweight notification; clients can re-fetch state.
         await hub.Clients
             .Groups($"site:{siteSlug}", $"room:{siteSlug}:{roomSlug}")
             .SendAsync("QueueUpdated", new { siteSlug, roomSlug }, cancellationToken);
+        Console.WriteLine($"[SignalR] Broadcast completed");
     }
 
     private static string TierFor(int points) => points >= 20 ? "VIP" : "NORMAL";
