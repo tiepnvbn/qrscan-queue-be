@@ -68,19 +68,15 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     }
     else
     {
-        var connectionString = builder.Configuration.GetConnectionString("Default");
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            var databaseUrl =
-                Environment.GetEnvironmentVariable("DATABASE_URL")
-                ?? Environment.GetEnvironmentVariable("POSTGRES_URL")
-                ?? Environment.GetEnvironmentVariable("POSTGRESQL_URL");
+        // Priority: DATABASE_URL (Render) > ConnectionStrings:Default (appsettings.json)
+        var databaseUrl =
+            Environment.GetEnvironmentVariable("DATABASE_URL")
+            ?? Environment.GetEnvironmentVariable("POSTGRES_URL")
+            ?? Environment.GetEnvironmentVariable("POSTGRESQL_URL");
 
-            if (!string.IsNullOrWhiteSpace(databaseUrl))
-            {
-                connectionString = BuildNpgsqlConnectionStringFromDatabaseUrl(databaseUrl);
-            }
-        }
+        var connectionString = !string.IsNullOrWhiteSpace(databaseUrl)
+            ? BuildNpgsqlConnectionStringFromDatabaseUrl(databaseUrl)
+            : builder.Configuration.GetConnectionString("Default");
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
