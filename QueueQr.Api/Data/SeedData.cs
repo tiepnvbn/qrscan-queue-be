@@ -17,7 +17,7 @@ public static class SeedData
         {
             var site = new Site
             {
-                Name = $"Co so {siteIndex}",
+                Name = $"Cơ sở {siteIndex}",
                 Slug = $"site-{siteIndex}",
             };
 
@@ -25,7 +25,7 @@ public static class SeedData
             {
                 site.Rooms.Add(new Room
                 {
-                    Name = $"Phong {roomIndex}",
+                    Name = $"Phòng {roomIndex}",
                     Slug = $"room-{roomIndex}",
                     ServiceMinutes = 10,
                 });
