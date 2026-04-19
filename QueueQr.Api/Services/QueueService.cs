@@ -22,25 +22,31 @@ public sealed class QueueService(
     public async Task<CustomerLoginResponse> LoginCustomerAsync(CustomerLoginRequest request, CancellationToken cancellationToken)
     {
         var phone = request.Phone.Trim();
-        var dob = request.DateOfBirth;
+        var name = request.Name?.Trim();
 
         var customer = await db.Customers
-            .FirstOrDefaultAsync(x => x.Phone == phone && x.DateOfBirth == dob, cancellationToken);
+            .FirstOrDefaultAsync(x => x.Phone == phone, cancellationToken);
 
         if (customer is null)
         {
             customer = new Customer
             {
                 Phone = phone,
-                DateOfBirth = dob,
+                Name = name,
                 Points = 0,
             };
             db.Customers.Add(customer);
             await db.SaveChangesAsync(cancellationToken);
         }
+        else if (!string.IsNullOrWhiteSpace(name) && customer.Name != name)
+        {
+            customer.Name = name;
+            await db.SaveChangesAsync(cancellationToken);
+        }
 
         return new CustomerLoginResponse(
             customer.Id,
+            customer.Name,
             customer.Points,
             FreeCreditsFor(customer.Points),
             TierFor(customer.Points)
@@ -227,9 +233,9 @@ public sealed class QueueService(
             throw new InvalidOperationException("Ticket is not for today");
         }
 
-        if (ticket.Status != TicketStatus.Serving)
+        if (ticket.Status is not (TicketStatus.Serving or TicketStatus.Waiting))
         {
-            throw new InvalidOperationException("Only the current (serving) ticket can be completed");
+            throw new InvalidOperationException("Ticket cannot be completed");
         }
 
         var siteSlug = ticket.Room.Site.Slug;
@@ -570,4 +576,189 @@ RETURNING "NextNumber";
     private static string TierFor(int points) => points >= 20 ? "VIP" : "NORMAL";
 
     private static int FreeCreditsFor(int points) => points / 5;
+
+    public async Task<RoomStatusDto> CancelTicketAsync(Guid ticketId, CancellationToken cancellationToken)
+    {
+        var nowUtc = clock.UtcNow;
+        var nowLocal = clock.NowLocal;
+        var today = clock.TodayLocal;
+
+        var ticket = await db.Tickets
+            .Include(x => x.Room)
+            .ThenInclude(r => r!.Site)
+            .FirstOrDefaultAsync(x => x.Id == ticketId, cancellationToken);
+
+        if (ticket?.Room?.Site is null)
+            throw new InvalidOperationException("Ticket not found");
+
+        if (ticket.Status is not TicketStatus.Waiting)
+            throw new InvalidOperationException("Only waiting tickets can be cancelled");
+
+        ticket.Status = TicketStatus.Cancelled;
+        ticket.SkippedAt = nowUtc;
+        await db.SaveChangesAsync(cancellationToken);
+
+        var siteSlug = ticket.Room.Site.Slug;
+        var roomSlug = ticket.Room.Slug;
+
+        InvalidateRoomCache(ticket.RoomId, today);
+        var status = await BuildRoomStatusAsync(ticket.Room, today, nowLocal, cancellationToken);
+        await BroadcastRoomUpdateAsync(siteSlug, roomSlug, cancellationToken);
+        return status;
+    }
+
+    // ── Staff methods ──────────────────────────────────────────────────
+
+    public async Task<StaffLoginResponse?> StaffLoginAsync(StaffLoginRequest request, CancellationToken cancellationToken)
+    {
+        var phone = request.Phone.Trim();
+        var staff = await db.Set<Entities.Staff>()
+            .Include(s => s.Site)
+            .FirstOrDefaultAsync(s => s.Phone == phone, cancellationToken);
+
+        if (staff is null || !PasswordHelper.Verify(request.Password, staff.PasswordHash))
+            return null;
+
+        return new StaffLoginResponse(staff.Id, staff.Name, staff.Id.ToString(), staff.Site!.Slug, staff.Site.Name);
+    }
+
+    public async Task<StaffTicketListResponse> ListTicketsForStaffAsync(
+        string siteSlug,
+        string? roomSlug,
+        string? search,
+        string[]? statuses,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        var serviceDate = clock.TodayLocal;
+        var now = clock.NowLocal;
+
+        var query = db.Tickets
+            .AsNoTracking()
+            .Include(t => t.Room).ThenInclude(r => r!.Site)
+            .Include(t => t.Customer)
+            .Where(t => t.Room!.Site!.Slug == siteSlug && t.ServiceDate == serviceDate);
+
+        if (!string.IsNullOrEmpty(roomSlug))
+            query = query.Where(t => t.Room!.Slug == roomSlug);
+
+        if (statuses is { Length: > 0 })
+        {
+            var statusEnums = statuses
+                .Select(s => Enum.TryParse<TicketStatus>(s, true, out var v) ? v : (TicketStatus?)null)
+                .Where(s => s.HasValue)
+                .Select(s => s!.Value)
+                .ToList();
+            if (statusEnums.Count > 0)
+                query = query.Where(t => statusEnums.Contains(t.Status));
+        }
+
+        if (!string.IsNullOrEmpty(search))
+        {
+            var s = search.Trim();
+            query = query.Where(t =>
+                (t.Customer != null && t.Customer.Name != null && t.Customer.Name.Contains(s)) ||
+                t.ShiftPrefix.Contains(s));
+        }
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .OrderByDescending(t => t.Number)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(t => new StaffTicketDto(
+                t.Id,
+                t.Number,
+                t.ShiftPrefix + (t.Number < 10 ? "0" : "") + t.Number.ToString(),
+                t.Customer != null ? t.Customer.Name : null,
+                t.Room!.Slug,
+                t.Room.Name,
+                t.Status.ToString(),
+                t.CreatedAt,
+                t.CalledAt,
+                t.CompletedAt,
+                t.Room.ServiceMinutes <= 0 ? DefaultServiceMinutes : t.Room.ServiceMinutes
+            ))
+            .ToListAsync(cancellationToken);
+
+        return new StaffTicketListResponse(items, totalCount, page, pageSize);
+    }
+
+    public async Task<RoomStatusDto> StaffCompleteTicketAsync(Guid ticketId, CancellationToken cancellationToken)
+    {
+        var nowUtc = clock.UtcNow;
+        var nowLocal = clock.NowLocal;
+        var today = clock.TodayLocal;
+
+        var ticket = await db.Tickets
+            .Include(x => x.Room)
+            .ThenInclude(r => r!.Site)
+            .FirstOrDefaultAsync(x => x.Id == ticketId, cancellationToken);
+
+        if (ticket?.Room?.Site is null)
+            throw new InvalidOperationException("Ticket not found");
+
+        if (ticket.Status is not (TicketStatus.Waiting or TicketStatus.Serving))
+            throw new InvalidOperationException("Only waiting or serving tickets can be completed by staff");
+
+        var siteSlug = ticket.Room.Site.Slug;
+        var roomSlug = ticket.Room.Slug;
+        var wasServing = ticket.Status == TicketStatus.Serving;
+
+        ticket.Status = TicketStatus.Completed;
+        ticket.CompletedAt = nowUtc;
+
+        if (ticket.CustomerId is not null)
+        {
+            var customer = await db.Customers.FirstOrDefaultAsync(x => x.Id == ticket.CustomerId, cancellationToken);
+            if (customer is not null)
+                customer.Points += 1;
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        if (wasServing)
+            await CallNextAsync(siteSlug, roomSlug, cancellationToken);
+
+        InvalidateRoomCache(ticket.RoomId, today);
+        var status = await BuildRoomStatusAsync(ticket.Room, today, nowLocal, cancellationToken);
+        await BroadcastRoomUpdateAsync(siteSlug, roomSlug, cancellationToken);
+        return status;
+    }
+
+    public async Task<RoomStatusDto> StaffCancelTicketAsync(Guid ticketId, CancellationToken cancellationToken)
+    {
+        var nowUtc = clock.UtcNow;
+        var nowLocal = clock.NowLocal;
+        var today = clock.TodayLocal;
+
+        var ticket = await db.Tickets
+            .Include(x => x.Room)
+            .ThenInclude(r => r!.Site)
+            .FirstOrDefaultAsync(x => x.Id == ticketId, cancellationToken);
+
+        if (ticket?.Room?.Site is null)
+            throw new InvalidOperationException("Ticket not found");
+
+        if (ticket.Status is not (TicketStatus.Waiting or TicketStatus.Serving))
+            throw new InvalidOperationException("Only waiting or serving tickets can be cancelled by staff");
+
+        var siteSlug = ticket.Room.Site.Slug;
+        var roomSlug = ticket.Room.Slug;
+        var wasServing = ticket.Status == TicketStatus.Serving;
+
+        ticket.Status = TicketStatus.Cancelled;
+        ticket.SkippedAt = nowUtc;
+        await db.SaveChangesAsync(cancellationToken);
+
+        if (wasServing)
+            await CallNextAsync(siteSlug, roomSlug, cancellationToken);
+
+        InvalidateRoomCache(ticket.RoomId, today);
+        var status = await BuildRoomStatusAsync(ticket.Room, today, nowLocal, cancellationToken);
+        await BroadcastRoomUpdateAsync(siteSlug, roomSlug, cancellationToken);
+        return status;
+    }
 }

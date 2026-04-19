@@ -1,16 +1,12 @@
 namespace QueueQr.Api.Entities;
 
-public sealed class Customer
+public sealed class Staff
 {
     public Guid Id { get; set; } = Guid.NewGuid();
-
-    public string? Name { get; set; }
     public required string Phone { get; set; }
-    public DateOnly DateOfBirth { get; set; }
-
-    public int Points { get; set; }
-
+    public required string PasswordHash { get; set; }
+    public string? Name { get; set; }
+    public Guid SiteId { get; set; }
+    public Site? Site { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-
-    public List<Ticket> Tickets { get; set; } = new();
 }

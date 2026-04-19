@@ -86,4 +86,12 @@ public sealed class PublicController(QueueService queue, AppDbContext db) : Cont
     {
         return Ok(await queue.SubmitFeedbackAsync(ticketId, request, cancellationToken));
     }
+
+    [HttpPost("tickets/{ticketId:guid}/cancel")]
+    public async Task<ActionResult<RoomStatusDto>> CancelTicket(
+        [FromRoute] Guid ticketId,
+        CancellationToken cancellationToken)
+    {
+        return Ok(await queue.CancelTicketAsync(ticketId, cancellationToken));
+    }
 }
