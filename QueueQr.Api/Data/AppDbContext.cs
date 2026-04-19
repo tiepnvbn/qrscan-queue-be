@@ -11,6 +11,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<Ticket> Tickets => Set<Ticket>();
     public DbSet<DailyCounter> DailyCounters => Set<DailyCounter>();
     public DbSet<Feedback> Feedbacks => Set<Feedback>();
+    public DbSet<Staff> StaffMembers => Set<Staff>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -36,8 +37,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
         modelBuilder.Entity<Customer>(b =>
         {
-            b.HasIndex(x => new { x.Phone, x.DateOfBirth }).IsUnique();
+            b.HasIndex(x => x.Phone).IsUnique();
             b.Property(x => x.Phone).HasMaxLength(30);
+            b.Property(x => x.Name).HasMaxLength(200);
         });
 
         modelBuilder.Entity<DailyCounter>(b =>
@@ -76,6 +78,18 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             b.HasIndex(x => x.TicketId).IsUnique();
             b.Property(x => x.Comment).HasMaxLength(2000);
+        });
+
+        modelBuilder.Entity<Staff>(b =>
+        {
+            b.HasIndex(x => x.Phone).IsUnique();
+            b.Property(x => x.Phone).HasMaxLength(30);
+            b.Property(x => x.Name).HasMaxLength(200);
+            b.Property(x => x.PasswordHash).HasMaxLength(500);
+            b.HasOne(x => x.Site)
+                .WithMany()
+                .HasForeignKey(x => x.SiteId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

@@ -6,4 +6,5 @@ public enum TicketStatus
     Serving = 1,
     Completed = 2,
     Skipped = 3,
+    Cancelled = 4,
 }
