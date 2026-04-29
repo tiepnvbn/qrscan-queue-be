@@ -8,7 +8,12 @@ namespace QueueQr.Api.Controllers;
 
 [ApiController]
 [Route("api/public")]
-public sealed class PublicController(QueueService queue, AppDbContext db) : ControllerBase
+public sealed class PublicController(
+    QueueService queue,
+    AppDbContext db,
+    SiteTokenService siteTokenService,
+    CustomerSessionService sessionService,
+    IConfiguration configuration) : ControllerBase
 {
     [HttpGet("sites")]
     public async Task<ActionResult<IReadOnlyList<SiteCatalogDto>>> GetSites(CancellationToken cancellationToken)
@@ -60,6 +65,17 @@ public sealed class PublicController(QueueService queue, AppDbContext db) : Cont
         [FromBody] TakeTicketRequest request,
         CancellationToken cancellationToken)
     {
+        // Validate session token if dynamic QR is enabled
+        if (IsDynamicQrEnabled())
+        {
+            var sessionToken = Request.Headers["X-Session-Token"].FirstOrDefault();
+            var session = sessionService.ValidateSession(sessionToken);
+            if (session is null)
+                return StatusCode(403, new { error = "Phiên làm việc không hợp lệ. Vui lòng scan QR tại cơ sở.", code = "INVALID_SESSION" });
+            if (!string.Equals(session.SiteSlug, siteSlug, StringComparison.OrdinalIgnoreCase))
+                return StatusCode(403, new { error = "Phiên làm việc không khớp với cơ sở này.", code = "SITE_MISMATCH" });
+        }
+
         var (ticket, status, myTicket) = await queue.TakeTicketAsync(siteSlug, roomSlug, request, cancellationToken);
         return Ok(new
         {
@@ -67,6 +83,121 @@ public sealed class PublicController(QueueService queue, AppDbContext db) : Cont
             number = ticket.Number,
             status,
             myTicket,
+        });
+    }
+
+    /// <summary>
+    /// Take tickets for multiple rooms at once.
+    /// </summary>
+    [HttpPost("sites/{siteSlug}/tickets")]
+    public async Task<ActionResult<TakeMultiRoomTicketResponse>> TakeMultiRoomTickets(
+        [FromRoute] string siteSlug,
+        [FromBody] TakeMultiRoomTicketRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.RoomSlugs is null || request.RoomSlugs.Length == 0)
+            return BadRequest("Vui lòng chọn ít nhất 1 phòng");
+
+        // Validate session token if dynamic QR is enabled
+        if (IsDynamicQrEnabled())
+        {
+            var sessionToken = request.SessionToken ?? Request.Headers["X-Session-Token"].FirstOrDefault();
+            var session = sessionService.ValidateSession(sessionToken);
+            if (session is null)
+                return StatusCode(403, new { error = "Phiên làm việc không hợp lệ. Vui lòng scan QR tại cơ sở.", code = "INVALID_SESSION" });
+            if (!string.Equals(session.SiteSlug, siteSlug, StringComparison.OrdinalIgnoreCase))
+                return StatusCode(403, new { error = "Phiên làm việc không khớp với cơ sở này.", code = "SITE_MISMATCH" });
+        }
+
+        var results = new List<MultiRoomTicketResult>();
+
+        foreach (var roomSlug in request.RoomSlugs)
+        {
+            var takeRequest = new TakeTicketRequest(request.CustomerId);
+            var (ticket, _, _) = await queue.TakeTicketAsync(siteSlug, roomSlug, takeRequest, cancellationToken);
+
+            var room = await db.Rooms.FirstOrDefaultAsync(r => r.Slug == roomSlug && r.Site!.Slug == siteSlug, cancellationToken);
+            var displayNumber = ShiftCalculator.FormatTicketNumber(ticket.ShiftPrefix, ticket.Number);
+
+            results.Add(new MultiRoomTicketResult(
+                ticket.Id,
+                roomSlug,
+                room?.Name ?? roomSlug,
+                ticket.Number,
+                displayNumber
+            ));
+        }
+
+        return Ok(new TakeMultiRoomTicketResponse(results.ToArray()));
+    }
+
+    // ── Dynamic QR Token endpoints ────────────────────────────────────
+
+    /// <summary>
+    /// Get current QR token for a site (used by TV/display screens).
+    /// </summary>
+    [HttpGet("sites/{siteSlug}/qr-token")]
+    public async Task<ActionResult<SiteQrTokenDto>> GetQrToken(
+        [FromRoute] string siteSlug,
+        CancellationToken cancellationToken)
+    {
+        var site = await db.Sites.FirstOrDefaultAsync(s => s.Slug == siteSlug, cancellationToken);
+        if (site is null) return NotFound("Site not found");
+
+        var token = await siteTokenService.GetOrCreateTokenAsync(site.Id, cancellationToken);
+
+        var frontendUrl = configuration["FrontendUrl"] ?? "http://localhost:5173";
+        var qrUrl = $"{frontendUrl}/s/{siteSlug}?token={token.Token}";
+
+        return Ok(new SiteQrTokenDto(token.Token, qrUrl, token.ExpiresAt));
+    }
+
+    /// <summary>
+    /// Verify a QR token after scanning. Returns a session token on success.
+    /// </summary>
+    [HttpPost("sites/{siteSlug}/verify-token")]
+    public async Task<ActionResult<VerifySiteTokenResponse>> VerifyToken(
+        [FromRoute] string siteSlug,
+        [FromBody] VerifySiteTokenRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Token))
+            return BadRequest("Token is required");
+
+        var clientIp = GetClientIp();
+        var userAgent = Request.Headers.UserAgent.FirstOrDefault();
+
+        var result = await siteTokenService.VerifyTokenAsync(
+            siteSlug, request.Token, clientIp, userAgent, null, cancellationToken);
+
+        if (!result.Success)
+        {
+            return Ok(new VerifySiteTokenResponse(false, null, null, null, result.ErrorMessage));
+        }
+
+        var site = await db.Sites.FirstOrDefaultAsync(s => s.Slug == siteSlug, cancellationToken);
+        var sessionToken = sessionService.CreateSession(result.SiteId!.Value, siteSlug);
+
+        return Ok(new VerifySiteTokenResponse(true, sessionToken, siteSlug, site?.Name, null));
+    }
+
+    /// <summary>
+    /// Check if the current session token is still valid.
+    /// </summary>
+    [HttpGet("session/validate")]
+    public ActionResult ValidateSession()
+    {
+        if (!IsDynamicQrEnabled())
+            return Ok(new { valid = true, dynamicQrEnabled = false });
+
+        var sessionToken = Request.Headers["X-Session-Token"].FirstOrDefault();
+        var session = sessionService.ValidateSession(sessionToken);
+
+        return Ok(new
+        {
+            valid = session is not null,
+            siteSlug = session?.SiteSlug,
+            dynamicQrEnabled = true,
         });
     }
 
@@ -93,5 +224,20 @@ public sealed class PublicController(QueueService queue, AppDbContext db) : Cont
         CancellationToken cancellationToken)
     {
         return Ok(await queue.CancelTicketAsync(ticketId, cancellationToken));
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    private bool IsDynamicQrEnabled()
+    {
+        return configuration.GetValue("DynamicQr:Enabled", false);
+    }
+
+    private string? GetClientIp()
+    {
+        var forwarded = Request.Headers["X-Forwarded-For"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(forwarded))
+            return forwarded.Split(',', StringSplitOptions.TrimEntries)[0];
+        return HttpContext.Connection.RemoteIpAddress?.ToString();
     }
 }

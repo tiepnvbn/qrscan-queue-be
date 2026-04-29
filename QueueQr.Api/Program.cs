@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using QueueQr.Api.Data;
 using QueueQr.Api.Hubs;
+using QueueQr.Api.Middleware;
 using QueueQr.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -91,6 +92,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddSingleton<IClock, AppClock>();
 builder.Services.AddScoped<QueueService>();
+builder.Services.AddScoped<SiteTokenService>();
+builder.Services.AddSingleton<CustomerSessionService>();
+builder.Services.AddSingleton<IpWhitelistService>();
 
 var app = builder.Build();
 
@@ -101,6 +105,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors();
+app.UseMiddleware<StaffIpWhitelistMiddleware>();
 app.MapControllers();
 app.MapHub<QueueHub>("/hubs/queue");
 

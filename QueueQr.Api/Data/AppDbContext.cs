@@ -12,6 +12,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<DailyCounter> DailyCounters => Set<DailyCounter>();
     public DbSet<Feedback> Feedbacks => Set<Feedback>();
     public DbSet<Staff> StaffMembers => Set<Staff>();
+    public DbSet<SiteQrToken> SiteQrTokens => Set<SiteQrToken>();
+    public DbSet<QrScanLog> QrScanLogs => Set<QrScanLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -86,6 +88,29 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             b.Property(x => x.Phone).HasMaxLength(30);
             b.Property(x => x.Name).HasMaxLength(200);
             b.Property(x => x.PasswordHash).HasMaxLength(500);
+            b.HasOne(x => x.Site)
+                .WithMany()
+                .HasForeignKey(x => x.SiteId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SiteQrToken>(b =>
+        {
+            b.HasIndex(x => x.Token).IsUnique();
+            b.HasIndex(x => new { x.SiteId, x.ExpiresAt });
+            b.Property(x => x.Token).HasMaxLength(64);
+            b.HasOne(x => x.Site)
+                .WithMany()
+                .HasForeignKey(x => x.SiteId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<QrScanLog>(b =>
+        {
+            b.HasIndex(x => new { x.SiteId, x.ScannedAt });
+            b.Property(x => x.Token).HasMaxLength(64);
+            b.Property(x => x.IpAddress).HasMaxLength(100);
+            b.Property(x => x.UserAgent).HasMaxLength(500);
             b.HasOne(x => x.Site)
                 .WithMany()
                 .HasForeignKey(x => x.SiteId)

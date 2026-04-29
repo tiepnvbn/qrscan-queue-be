@@ -9,7 +9,7 @@ namespace QueueQr.Api.Controllers;
 
 [ApiController]
 [Route("api/staff")]
-public sealed class StaffController(QueueService queue, AppDbContext db) : ControllerBase
+public sealed class StaffController(QueueService queue, AppDbContext db, IpWhitelistService ipWhitelist) : ControllerBase
 {
     // ── Phase 2: Authentication + Ticket management ──────────────────
 
@@ -24,6 +24,20 @@ public sealed class StaffController(QueueService queue, AppDbContext db) : Contr
         var result = await queue.StaffLoginAsync(request, cancellationToken);
         if (result is null)
             return Unauthorized("Invalid phone or password");
+
+        // Validate that staff's site matches the IP-derived site
+        if (ipWhitelist.IsEnabled())
+        {
+            var clientIp = GetClientIp();
+            if (!ipWhitelist.IsStaffAllowedFromIp(result.SiteSlug, clientIp))
+            {
+                return StatusCode(403, new
+                {
+                    error = "Bạn chỉ có thể đăng nhập tại cơ sở của mình.",
+                    code = "STAFF_SITE_MISMATCH"
+                });
+            }
+        }
 
         return Ok(result);
     }
@@ -113,5 +127,13 @@ public sealed class StaffController(QueueService queue, AppDbContext db) : Contr
         var token = auth["Bearer ".Length..];
         if (!Guid.TryParse(token, out var staffId)) return null;
         return await db.StaffMembers.Include(s => s.Site).FirstOrDefaultAsync(s => s.Id == staffId, ct);
+    }
+
+    private string? GetClientIp()
+    {
+        var forwarded = Request.Headers["X-Forwarded-For"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(forwarded))
+            return forwarded.Split(',', StringSplitOptions.TrimEntries)[0];
+        return HttpContext.Connection.RemoteIpAddress?.ToString();
     }
 }
