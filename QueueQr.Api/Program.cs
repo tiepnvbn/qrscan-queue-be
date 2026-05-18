@@ -113,7 +113,10 @@ app.MapHub<QueueHub>("/hubs/queue");
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.EnsureDeletedAsync();
+    if (app.Environment.IsDevelopment())
+    {
+        await db.Database.EnsureDeletedAsync();
+    }
     await db.Database.EnsureCreatedAsync();
     await SeedData.EnsureSeededAsync(db);
 }
