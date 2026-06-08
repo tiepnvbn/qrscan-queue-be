@@ -98,11 +98,10 @@ builder.Services.AddSingleton<IpWhitelistService>();
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// Swagger is enabled in all environments so the integration team can
+// browse live API docs at /swagger on Render and other hosted environments.
+app.UseSwagger();
+app.UseSwaggerUI();
 
 app.UseCors();
 app.UseMiddleware<StaffIpWhitelistMiddleware>();

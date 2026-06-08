@@ -1,0 +1,591 @@
+{
+  "info": {
+    "name": "QueueQr API",
+    "description": "QR-Scan Queue Management System — Backend API Collection\n\n**Base URL:** `https://your-api-host`\n\n## Authentication\n- **Customer endpoints** (`/api/public`): No auth by default. When Dynamic QR is enabled, include `X-Session-Token` header after verifying a QR token.\n- **Staff endpoints** (`/api/staff`): Bearer token auth — `Authorization: Bearer {staffId}` (staffId GUID returned from login).\n- **TV endpoints** (`/api/tv`): No auth required.\n\n## Real-time (SignalR)\nHub URL: `/hubs/queue`\n- `JoinSite(siteSlug)` — subscribe to site-wide updates\n- `JoinRoom(siteSlug, roomSlug)` — subscribe to room-level updates\n- Server event: `queue-updated` — broadcasted after any state change",
+    "version": "2.0.0",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://your-api-host",
+      "type": "string"
+    },
+    {
+      "key": "staffToken",
+      "value": "",
+      "type": "string",
+      "description": "Staff GUID returned from POST /api/staff/login"
+    },
+    {
+      "key": "sessionToken",
+      "value": "",
+      "type": "string",
+      "description": "Session token returned from POST /api/public/sites/{siteSlug}/verify-token"
+    }
+  ],
+  "item": [
+    {
+      "name": "Public",
+      "description": "Customer-facing endpoints. No authentication required unless Dynamic QR is enabled.",
+      "item": [
+        {
+          "name": "Get All Sites",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/public/sites",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "sites"]
+            },
+            "description": "Returns a list of all sites with their rooms."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{baseUrl}}/api/public/sites" }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "[\n  {\n    \"siteId\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n    \"siteSlug\": \"site-1\",\n    \"siteName\": \"Main Branch\",\n    \"rooms\": [\n      {\n        \"roomId\": \"3fa85f64-5717-4562-b3fc-2c963f66afa7\",\n        \"roomSlug\": \"room-a\",\n        \"roomName\": \"Room A\",\n        \"serviceMinutes\": 10\n      }\n    ]\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "Customer Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"0901234567\",\n  \"name\": \"Nguyen Van A\",\n  \"dateOfBirth\": \"1990-01-15\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/public/customers/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "customers", "login"]
+            },
+            "description": "Register or login a customer by phone number. If the customer does not exist, they are created. Returns the customer profile and loyalty info."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"customerId\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"name\": \"Nguyen Van A\",\n  \"points\": 50,\n  \"freeCredits\": 0,\n  \"tier\": \"Silver\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Room Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/public/sites/:siteSlug/rooms/:roomSlug/status?ticketId=",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "sites", ":siteSlug", "rooms", ":roomSlug", "status"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1", "description": "Site slug" },
+                { "key": "roomSlug", "value": "room-a", "description": "Room slug" }
+              ],
+              "query": [
+                {
+                  "key": "ticketId",
+                  "value": "",
+                  "description": "(Optional) GUID of a ticket — returns myTicket info if provided",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Get the current queue status for a specific room, including current serving number, next number, and waiting count. Optionally pass a `ticketId` to get the customer's own ticket position."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"siteSlug\": \"site-1\",\n  \"roomSlug\": \"room-a\",\n  \"status\": {\n    \"roomId\": \"3fa85f64-5717-4562-b3fc-2c963f66afa7\",\n    \"roomSlug\": \"room-a\",\n    \"roomName\": \"Room A\",\n    \"serviceDate\": \"2026-06-08\",\n    \"serviceMinutes\": 10,\n    \"currentNumber\": 5,\n    \"currentDisplayNumber\": \"A005\",\n    \"nextNumber\": 6,\n    \"nextDisplayNumber\": \"A006\",\n    \"nextToTakeNumber\": 10,\n    \"nextToTakeDisplayNumber\": \"A010\",\n    \"waitingCount\": 4,\n    \"now\": \"2026-06-08T09:30:00+07:00\"\n  },\n  \"myTicket\": null\n}"
+            }
+          ]
+        },
+        {
+          "name": "Take Ticket (Single Room)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Session-Token", "value": "{{sessionToken}}", "description": "Required only when Dynamic QR is enabled" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/public/sites/:siteSlug/rooms/:roomSlug/tickets",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "sites", ":siteSlug", "rooms", ":roomSlug", "tickets"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" },
+                { "key": "roomSlug", "value": "room-a" }
+              ]
+            },
+            "description": "Take a queue ticket for a specific room. `customerId` is optional (anonymous ticket allowed). When Dynamic QR is enabled, `X-Session-Token` header is required."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"ticketId\": \"3fa85f64-5717-4562-b3fc-2c963f66afb1\",\n  \"number\": 10,\n  \"status\": \"Waiting\",\n  \"myTicket\": {\n    \"ticketId\": \"3fa85f64-5717-4562-b3fc-2c963f66afb1\",\n    \"number\": 10,\n    \"displayNumber\": \"A010\",\n    \"status\": \"Waiting\",\n    \"aheadCount\": 4,\n    \"estimatedWaitMinutes\": 40,\n    \"estimatedServeTime\": \"2026-06-08T10:10:00+07:00\"\n  }\n}"
+            },
+            {
+              "name": "403 Invalid Session",
+              "status": "Forbidden",
+              "code": 403,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"error\": \"Phiên làm việc không hợp lệ. Vui lòng scan QR tại cơ sở.\",\n  \"code\": \"INVALID_SESSION\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Take Tickets (Multi-Room)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"roomSlugs\": [\"room-a\", \"room-b\"],\n  \"customerId\": \"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\n  \"sessionToken\": \"{{sessionToken}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/public/sites/:siteSlug/tickets",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "sites", ":siteSlug", "tickets"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" }
+              ]
+            },
+            "description": "Take tickets for multiple rooms at once under the same site. Returns an array of ticket results, one per room."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tickets\": [\n    {\n      \"ticketId\": \"3fa85f64-5717-4562-b3fc-2c963f66afb1\",\n      \"roomSlug\": \"room-a\",\n      \"roomName\": \"Room A\",\n      \"number\": 10,\n      \"displayNumber\": \"A010\"\n    },\n    {\n      \"ticketId\": \"3fa85f64-5717-4562-b3fc-2c963f66afb2\",\n      \"roomSlug\": \"room-b\",\n      \"roomName\": \"Room B\",\n      \"number\": 3,\n      \"displayNumber\": \"A003\"\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get QR Token (for TV/Display)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/public/sites/:siteSlug/qr-token",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "sites", ":siteSlug", "qr-token"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" }
+              ]
+            },
+            "description": "Get the current rotating QR token for a site. Used by TV/display screens to render the QR code that customers scan."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"token\": \"abc123xyz\",\n  \"qrUrl\": \"https://qrscanqueue.netlify.app/s/site-1?token=abc123xyz\",\n  \"expiresAt\": \"2026-06-08T10:00:00+00:00\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Verify QR Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"abc123xyz\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/public/sites/:siteSlug/verify-token",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "sites", ":siteSlug", "verify-token"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" }
+              ]
+            },
+            "description": "Verify a QR token after the customer scans the QR code. Returns a session token on success. The session token must be included in subsequent ticket-taking requests as `X-Session-Token`."
+          },
+          "response": [
+            {
+              "name": "200 OK — Success",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"sessionToken\": \"eyJhbGci...\",\n  \"siteSlug\": \"site-1\",\n  \"siteName\": \"Main Branch\",\n  \"errorMessage\": null\n}"
+            },
+            {
+              "name": "200 OK — Failed",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": false,\n  \"sessionToken\": null,\n  \"siteSlug\": null,\n  \"siteName\": null,\n  \"errorMessage\": \"Token expired or invalid\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Validate Session",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Session-Token", "value": "{{sessionToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/public/session/validate",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "session", "validate"]
+            },
+            "description": "Check whether the current session token is still valid. Returns `valid: true` if valid, or `valid: false` with no session info if expired/missing."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"valid\": true,\n  \"siteSlug\": \"site-1\",\n  \"dynamicQrEnabled\": true\n}"
+            }
+          ]
+        },
+        {
+          "name": "Complete Ticket (Customer)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/public/tickets/:ticketId/complete",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "tickets", ":ticketId", "complete"],
+              "variable": [
+                { "key": "ticketId", "value": "3fa85f64-5717-4562-b3fc-2c963f66afb1" }
+              ]
+            },
+            "description": "Mark a ticket as completed. Returns updated room status."
+          },
+          "response": []
+        },
+        {
+          "name": "Submit Feedback",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"stars\": 5,\n  \"comment\": \"Great service!\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/public/tickets/:ticketId/feedback",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "tickets", ":ticketId", "feedback"],
+              "variable": [
+                { "key": "ticketId", "value": "3fa85f64-5717-4562-b3fc-2c963f66afb1" }
+              ]
+            },
+            "description": "Submit a star rating and optional comment for a completed ticket. `stars` must be 1–5."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"feedbackId\": \"3fa85f64-5717-4562-b3fc-2c963f66afc1\",\n  \"ticketId\": \"3fa85f64-5717-4562-b3fc-2c963f66afb1\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Cancel Ticket (Customer)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/public/tickets/:ticketId/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "public", "tickets", ":ticketId", "cancel"],
+              "variable": [
+                { "key": "ticketId", "value": "3fa85f64-5717-4562-b3fc-2c963f66afb1" }
+              ]
+            },
+            "description": "Cancel a waiting ticket. Returns updated room status."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Staff",
+      "description": "Staff-facing endpoints. Requires `Authorization: Bearer {staffId}` header after login.",
+      "item": [
+        {
+          "name": "Staff Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  var json = pm.response.json();",
+                  "  pm.collectionVariables.set('staffToken', json.staffId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"0901234567\",\n  \"password\": \"password123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "login"]
+            },
+            "description": "Authenticate a staff member. Returns a `staffId` GUID used as the Bearer token for subsequent staff API calls. The test script auto-saves the staffId into `staffToken` variable."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"staffId\": \"3fa85f64-5717-4562-b3fc-2c963f66afd1\",\n  \"name\": \"Tran Thi B\",\n  \"token\": \"3fa85f64-5717-4562-b3fc-2c963f66afd1\",\n  \"siteSlug\": \"site-1\",\n  \"siteName\": \"Main Branch\"\n}"
+            },
+            {
+              "name": "401 Unauthorized",
+              "status": "Unauthorized",
+              "code": 401,
+              "body": "Invalid phone or password"
+            }
+          ]
+        },
+        {
+          "name": "List Tickets",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{staffToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/sites/:siteSlug/tickets?page=1&pageSize=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "sites", ":siteSlug", "tickets"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" }
+              ],
+              "query": [
+                { "key": "roomSlug", "value": "room-a", "description": "Filter by room slug", "disabled": true },
+                { "key": "search", "value": "", "description": "Search by customer name or ticket number", "disabled": true },
+                { "key": "status", "value": "Waiting", "description": "Filter by status (Waiting, Serving, Completed, Skipped, Cancelled). Repeatable.", "disabled": true },
+                { "key": "page", "value": "1" },
+                { "key": "pageSize", "value": "20" }
+              ]
+            },
+            "description": "List tickets for a site with optional filters. Supports pagination, room filter, text search, and status filter (repeatable `status` query param)."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"items\": [\n    {\n      \"ticketId\": \"3fa85f64-5717-4562-b3fc-2c963f66afb1\",\n      \"number\": 10,\n      \"displayNumber\": \"A010\",\n      \"customerName\": \"Nguyen Van A\",\n      \"roomSlug\": \"room-a\",\n      \"roomName\": \"Room A\",\n      \"status\": \"Waiting\",\n      \"createdAt\": \"2026-06-08T09:00:00+07:00\",\n      \"calledAt\": null,\n      \"completedAt\": null,\n      \"serviceMinutes\": 10\n    }\n  ],\n  \"totalCount\": 1,\n  \"page\": 1,\n  \"pageSize\": 20\n}"
+            }
+          ]
+        },
+        {
+          "name": "Complete Ticket (Staff)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{staffToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/tickets/:ticketId/complete",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "tickets", ":ticketId", "complete"],
+              "variable": [
+                { "key": "ticketId", "value": "3fa85f64-5717-4562-b3fc-2c963f66afb1" }
+              ]
+            },
+            "description": "Mark a specific ticket as completed. Returns updated room status DTO."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Ticket (Staff)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{staffToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/tickets/:ticketId/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "tickets", ":ticketId", "cancel"],
+              "variable": [
+                { "key": "ticketId", "value": "3fa85f64-5717-4562-b3fc-2c963f66afb1" }
+              ]
+            },
+            "description": "Cancel a specific ticket. Returns updated room status DTO."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Waiting List",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{staffToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/sites/:siteSlug/rooms/:roomSlug/waiting",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "sites", ":siteSlug", "rooms", ":roomSlug", "waiting"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" },
+                { "key": "roomSlug", "value": "room-a" }
+              ]
+            },
+            "description": "Get a list of ticket numbers currently in the waiting queue for a room."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "[6, 7, 8, 9, 10]"
+            }
+          ]
+        },
+        {
+          "name": "Call Next",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{staffToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/sites/:siteSlug/rooms/:roomSlug/call-next",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "sites", ":siteSlug", "rooms", ":roomSlug", "call-next"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" },
+                { "key": "roomSlug", "value": "room-a" }
+              ]
+            },
+            "description": "Call the next waiting ticket in the queue. Changes ticket status from Waiting to Serving. Broadcasts a SignalR `queue-updated` event."
+          },
+          "response": []
+        },
+        {
+          "name": "Complete Current",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{staffToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/sites/:siteSlug/rooms/:roomSlug/complete-current",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "sites", ":siteSlug", "rooms", ":roomSlug", "complete-current"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" },
+                { "key": "roomSlug", "value": "room-a" }
+              ]
+            },
+            "description": "Complete the currently serving ticket. Changes status to Completed and triggers SignalR update."
+          },
+          "response": []
+        },
+        {
+          "name": "Skip Current",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{staffToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/staff/sites/:siteSlug/rooms/:roomSlug/skip-current",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "staff", "sites", ":siteSlug", "rooms", ":roomSlug", "skip-current"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" },
+                { "key": "roomSlug", "value": "room-a" }
+              ]
+            },
+            "description": "Skip the currently serving ticket (mark as Skipped). Triggers SignalR update."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "TV / Display",
+      "description": "Read-only endpoints for TV display screens. No authentication required.",
+      "item": [
+        {
+          "name": "Get Site Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/tv/sites/:siteSlug/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "tv", "sites", ":siteSlug", "status"],
+              "variable": [
+                { "key": "siteSlug", "value": "site-1" }
+              ]
+            },
+            "description": "Get the full status of all rooms in a site. Used by TV/display screens to render the queue board."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"siteSlug\": \"site-1\",\n  \"now\": \"2026-06-08T09:30:00+07:00\",\n  \"rooms\": [\n    {\n      \"roomId\": \"3fa85f64-5717-4562-b3fc-2c963f66afa7\",\n      \"roomSlug\": \"room-a\",\n      \"roomName\": \"Room A\",\n      \"serviceDate\": \"2026-06-08\",\n      \"serviceMinutes\": 10,\n      \"currentNumber\": 5,\n      \"currentDisplayNumber\": \"A005\",\n      \"nextNumber\": 6,\n      \"nextDisplayNumber\": \"A006\",\n      \"nextToTakeNumber\": 10,\n      \"nextToTakeDisplayNumber\": \"A010\",\n      \"waitingCount\": 4,\n      \"now\": \"2026-06-08T09:30:00+07:00\"\n    }\n  ]\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

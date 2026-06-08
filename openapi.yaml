@@ -1,0 +1,990 @@
+openapi: 3.0.3
+info:
+  title: QueueQr API
+  description: |
+    QR-Scan Queue Management System — Backend REST API
+
+    ## Authentication
+    | Endpoint group | Auth method |
+    |---|---|
+    | `/api/public/*` | None (session token via `X-Session-Token` header when Dynamic QR is enabled) |
+    | `/api/staff/*` | `Authorization: Bearer {staffId}` (GUID from login) |
+    | `/api/tv/*` | None |
+
+    ## Real-time (SignalR)
+    Hub endpoint: `/hubs/queue`
+
+    Client methods to call on the hub:
+    - `JoinSite(siteSlug)` — subscribe to all updates for a site
+    - `JoinRoom(siteSlug, roomSlug)` — subscribe to updates for a specific room
+
+    Server-pushed events:
+    - `queue-updated` — emitted after any queue state change (call, complete, skip, cancel, new ticket)
+  version: "2.0.0"
+  contact:
+    name: QueueQr Backend Team
+
+servers:
+  - url: https://your-api-host
+    description: Production
+  - url: http://localhost:5000
+    description: Local development
+
+tags:
+  - name: Public
+    description: Customer-facing endpoints. No auth required (unless Dynamic QR mode is on).
+  - name: Staff
+    description: Staff management endpoints. Requires Bearer token from staff login.
+  - name: TV
+    description: Read-only status endpoints for TV/display screens.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ──────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Public ────────────────────────────────────────────────────────────────
+
+  /api/public/sites:
+    get:
+      tags: [Public]
+      summary: Get all sites
+      description: Returns a list of all sites with their rooms, ordered by slug.
+      operationId: getSites
+      responses:
+        "200":
+          description: List of sites
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SiteCatalogDto"
+              example:
+                - siteId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  siteSlug: "site-1"
+                  siteName: "Main Branch"
+                  rooms:
+                    - roomId: "3fa85f64-5717-4562-b3fc-2c963f66afa7"
+                      roomSlug: "room-a"
+                      roomName: "Room A"
+                      serviceMinutes: 10
+
+  /api/public/customers/login:
+    post:
+      tags: [Public]
+      summary: Customer login / register
+      description: |
+        Register or login a customer by phone number.
+        If the customer does not exist they are created automatically.
+        Returns the customer's profile including loyalty points and tier.
+      operationId: customerLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerLoginRequest"
+            example:
+              phone: "0901234567"
+              name: "Nguyen Van A"
+              dateOfBirth: "1990-01-15"
+      responses:
+        "200":
+          description: Customer profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerLoginResponse"
+        "400":
+          description: Phone is required
+
+  /api/public/sites/{siteSlug}/rooms/{roomSlug}/status:
+    get:
+      tags: [Public]
+      summary: Get room queue status
+      description: |
+        Returns the current queue status for a room including the currently serving
+        number, next number, waiting count, and estimated times.
+        Pass `ticketId` to additionally receive the caller's own ticket position.
+      operationId: getRoomStatus
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+        - $ref: "#/components/parameters/roomSlug"
+        - name: ticketId
+          in: query
+          required: false
+          description: Optional ticket GUID — returns `myTicket` position info when supplied.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Room status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomStatusResponse"
+
+  /api/public/sites/{siteSlug}/rooms/{roomSlug}/tickets:
+    post:
+      tags: [Public]
+      summary: Take a ticket (single room)
+      description: |
+        Take a queue number for a specific room. `customerId` is optional — anonymous
+        tickets are supported. When **Dynamic QR** is enabled the `X-Session-Token`
+        header obtained from `/verify-token` is required.
+      operationId: takeTicket
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+        - $ref: "#/components/parameters/roomSlug"
+        - name: X-Session-Token
+          in: header
+          required: false
+          description: Session token (required when Dynamic QR is enabled).
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TakeTicketRequest"
+      responses:
+        "200":
+          description: Ticket created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TakeTicketResponse"
+        "403":
+          description: Invalid or mismatched session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionError"
+
+  /api/public/sites/{siteSlug}/tickets:
+    post:
+      tags: [Public]
+      summary: Take tickets (multi-room)
+      description: |
+        Take queue numbers for multiple rooms in the same site at once.
+        Returns one ticket per room. Session token rules same as single-room endpoint.
+      operationId: takeMultiRoomTickets
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TakeMultiRoomTicketRequest"
+            example:
+              roomSlugs: ["room-a", "room-b"]
+              customerId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+              sessionToken: null
+      responses:
+        "200":
+          description: Tickets created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TakeMultiRoomTicketResponse"
+        "400":
+          description: At least one room must be specified
+        "403":
+          description: Invalid or mismatched session token
+
+  /api/public/sites/{siteSlug}/qr-token:
+    get:
+      tags: [Public]
+      summary: Get site QR token (for TV/display)
+      description: |
+        Returns the current rotating QR token and full URL for the site. Used by TV
+        display screens to render a QR code that customers scan to start their session.
+      operationId: getSiteQrToken
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+      responses:
+        "200":
+          description: QR token details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteQrTokenDto"
+        "404":
+          description: Site not found
+
+  /api/public/sites/{siteSlug}/verify-token:
+    post:
+      tags: [Public]
+      summary: Verify QR token after scanning
+      description: |
+        Called immediately after the customer scans the QR code. Validates the token
+        and returns a short-lived `sessionToken`. Include this token as the
+        `X-Session-Token` header on all subsequent ticket-taking requests.
+      operationId: verifySiteToken
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifySiteTokenRequest"
+      responses:
+        "200":
+          description: Verification result (check `success` field — always HTTP 200)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifySiteTokenResponse"
+        "400":
+          description: Token is required
+
+  /api/public/session/validate:
+    get:
+      tags: [Public]
+      summary: Validate session token
+      description: |
+        Check whether a session token is still valid.
+        If Dynamic QR is disabled, always returns `valid: true`.
+      operationId: validateSession
+      parameters:
+        - name: X-Session-Token
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                  siteSlug:
+                    type: string
+                    nullable: true
+                  dynamicQrEnabled:
+                    type: boolean
+              example:
+                valid: true
+                siteSlug: "site-1"
+                dynamicQrEnabled: true
+
+  /api/public/tickets/{ticketId}/complete:
+    post:
+      tags: [Public]
+      summary: Complete ticket (customer)
+      description: Mark a ticket as completed from the customer side. Returns updated room status.
+      operationId: completeTicketByCustomer
+      parameters:
+        - $ref: "#/components/parameters/ticketId"
+      responses:
+        "200":
+          description: Updated room status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomStatusDto"
+
+  /api/public/tickets/{ticketId}/feedback:
+    post:
+      tags: [Public]
+      summary: Submit feedback for a ticket
+      description: Submit a star rating (1–5) and optional text comment for a completed ticket.
+      operationId: submitFeedback
+      parameters:
+        - $ref: "#/components/parameters/ticketId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackRequest"
+      responses:
+        "200":
+          description: Feedback saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+
+  /api/public/tickets/{ticketId}/cancel:
+    post:
+      tags: [Public]
+      summary: Cancel ticket (customer)
+      description: Cancel a waiting ticket. Returns updated room status.
+      operationId: cancelTicketByCustomer
+      parameters:
+        - $ref: "#/components/parameters/ticketId"
+      responses:
+        "200":
+          description: Updated room status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomStatusDto"
+
+  # ── Staff ─────────────────────────────────────────────────────────────────
+
+  /api/staff/login:
+    post:
+      tags: [Staff]
+      summary: Staff login
+      description: |
+        Authenticate a staff member. Returns a `token` (the staff GUID) to be used
+        as a Bearer token for all other staff endpoints.
+
+        **Auth:** `Authorization: Bearer {token}`
+      operationId: staffLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StaffLoginRequest"
+            example:
+              phone: "0901234567"
+              password: "password123"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffLoginResponse"
+        "400":
+          description: Phone and password are required
+        "401":
+          description: Invalid phone or password
+        "403":
+          description: Staff can only login from their own site's IP (when IP whitelist is enabled)
+
+  /api/staff/sites/{siteSlug}/tickets:
+    get:
+      tags: [Staff]
+      summary: List tickets
+      description: |
+        Paginated list of tickets for a site. Supports filtering by room, text search,
+        and one or more ticket statuses. Requires Bearer auth.
+      operationId: listTickets
+      security:
+        - StaffBearer: []
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+        - name: roomSlug
+          in: query
+          required: false
+          description: Filter to a specific room.
+          schema:
+            type: string
+        - name: search
+          in: query
+          required: false
+          description: Search by customer name or ticket number.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: |
+            Filter by ticket status. Repeatable — e.g. `?status=Waiting&status=Serving`.
+            Values: `Waiting`, `Serving`, `Completed`, `Skipped`, `Cancelled`.
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [Waiting, Serving, Completed, Skipped, Cancelled]
+          style: form
+          explode: true
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Paginated ticket list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffTicketListResponse"
+        "401":
+          description: Missing or invalid Bearer token
+
+  /api/staff/tickets/{ticketId}/complete:
+    post:
+      tags: [Staff]
+      summary: Complete ticket (staff)
+      description: Mark a specific ticket as completed. Returns updated room status DTO.
+      operationId: staffCompleteTicket
+      security:
+        - StaffBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ticketId"
+      responses:
+        "200":
+          description: Updated room status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomStatusDto"
+        "401":
+          description: Unauthorized
+
+  /api/staff/tickets/{ticketId}/cancel:
+    post:
+      tags: [Staff]
+      summary: Cancel ticket (staff)
+      description: Cancel a specific ticket. Returns updated room status DTO.
+      operationId: staffCancelTicket
+      security:
+        - StaffBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ticketId"
+      responses:
+        "200":
+          description: Updated room status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomStatusDto"
+        "401":
+          description: Unauthorized
+
+  /api/staff/sites/{siteSlug}/rooms/{roomSlug}/waiting:
+    get:
+      tags: [Staff]
+      summary: Get waiting queue numbers
+      description: Returns an array of ticket numbers currently waiting for a specific room.
+      operationId: getWaitingList
+      security:
+        - StaffBearer: []
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+        - $ref: "#/components/parameters/roomSlug"
+      responses:
+        "200":
+          description: Array of waiting ticket numbers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: integer
+              example: [6, 7, 8, 9, 10]
+
+  /api/staff/sites/{siteSlug}/rooms/{roomSlug}/call-next:
+    post:
+      tags: [Staff]
+      summary: Call next ticket
+      description: |
+        Call the next waiting ticket in the queue — changes its status from `Waiting`
+        to `Serving`. Broadcasts a `queue-updated` SignalR event.
+      operationId: callNext
+      security:
+        - StaffBearer: []
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+        - $ref: "#/components/parameters/roomSlug"
+      responses:
+        "200":
+          description: Updated room status
+
+  /api/staff/sites/{siteSlug}/rooms/{roomSlug}/complete-current:
+    post:
+      tags: [Staff]
+      summary: Complete current ticket
+      description: Complete the currently serving ticket. Triggers SignalR update.
+      operationId: completeCurrent
+      security:
+        - StaffBearer: []
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+        - $ref: "#/components/parameters/roomSlug"
+      responses:
+        "200":
+          description: Updated room status
+
+  /api/staff/sites/{siteSlug}/rooms/{roomSlug}/skip-current:
+    post:
+      tags: [Staff]
+      summary: Skip current ticket
+      description: Skip the currently serving ticket (mark as Skipped). Triggers SignalR update.
+      operationId: skipCurrent
+      security:
+        - StaffBearer: []
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+        - $ref: "#/components/parameters/roomSlug"
+      responses:
+        "200":
+          description: Updated room status
+
+  # ── TV / Display ──────────────────────────────────────────────────────────
+
+  /api/tv/sites/{siteSlug}/status:
+    get:
+      tags: [TV]
+      summary: Get site status (TV display)
+      description: |
+        Returns the full queue status for all rooms in a site.
+        Used by TV/display screens to render the queue board.
+      operationId: getTvSiteStatus
+      parameters:
+        - $ref: "#/components/parameters/siteSlug"
+      responses:
+        "200":
+          description: Site status with all rooms
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteStatusDto"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ──────────────────────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    StaffBearer:
+      type: http
+      scheme: bearer
+      description: "Use the `token` (staffId GUID) returned from POST /api/staff/login"
+
+  parameters:
+    siteSlug:
+      name: siteSlug
+      in: path
+      required: true
+      description: URL-friendly site identifier (e.g. `site-1`)
+      schema:
+        type: string
+    roomSlug:
+      name: roomSlug
+      in: path
+      required: true
+      description: URL-friendly room identifier (e.g. `room-a`)
+      schema:
+        type: string
+    ticketId:
+      name: ticketId
+      in: path
+      required: true
+      description: Ticket GUID
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+
+    # ── Catalog ───────────────────────────────────────────────────────────
+
+    RoomCatalogDto:
+      type: object
+      properties:
+        roomId:
+          type: string
+          format: uuid
+        roomSlug:
+          type: string
+        roomName:
+          type: string
+        serviceMinutes:
+          type: integer
+          description: Average service time per customer in minutes
+      required: [roomId, roomSlug, roomName, serviceMinutes]
+
+    SiteCatalogDto:
+      type: object
+      properties:
+        siteId:
+          type: string
+          format: uuid
+        siteSlug:
+          type: string
+        siteName:
+          type: string
+        rooms:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoomCatalogDto"
+      required: [siteId, siteSlug, siteName, rooms]
+
+    # ── Customer ──────────────────────────────────────────────────────────
+
+    CustomerLoginRequest:
+      type: object
+      properties:
+        phone:
+          type: string
+          description: Customer phone number (used as unique identifier)
+        name:
+          type: string
+          nullable: true
+        dateOfBirth:
+          type: string
+          format: date
+          nullable: true
+          example: "1990-01-15"
+      required: [phone]
+
+    CustomerLoginResponse:
+      type: object
+      properties:
+        customerId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        points:
+          type: integer
+          description: Total loyalty points
+        freeCredits:
+          type: integer
+        tier:
+          type: string
+          description: "Loyalty tier (e.g. Bronze, Silver, Gold)"
+      required: [customerId, points, freeCredits, tier]
+
+    # ── Ticket / Queue ────────────────────────────────────────────────────
+
+    TakeTicketRequest:
+      type: object
+      properties:
+        customerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Optional — links ticket to a registered customer
+
+    TakeTicketResponse:
+      type: object
+      properties:
+        ticketId:
+          type: string
+          format: uuid
+        number:
+          type: integer
+        status:
+          type: string
+          example: "Waiting"
+        myTicket:
+          $ref: "#/components/schemas/MyTicketDto"
+      required: [ticketId, number, status]
+
+    TakeMultiRoomTicketRequest:
+      type: object
+      properties:
+        roomSlugs:
+          type: array
+          items:
+            type: string
+          description: One or more room slugs to take tickets for
+        customerId:
+          type: string
+          format: uuid
+          nullable: true
+        sessionToken:
+          type: string
+          nullable: true
+          description: Alternative to the X-Session-Token header
+      required: [roomSlugs]
+
+    MultiRoomTicketResult:
+      type: object
+      properties:
+        ticketId:
+          type: string
+          format: uuid
+        roomSlug:
+          type: string
+        roomName:
+          type: string
+        number:
+          type: integer
+        displayNumber:
+          type: string
+          description: Formatted number including shift prefix (e.g. "A010")
+      required: [ticketId, roomSlug, roomName, number, displayNumber]
+
+    TakeMultiRoomTicketResponse:
+      type: object
+      properties:
+        tickets:
+          type: array
+          items:
+            $ref: "#/components/schemas/MultiRoomTicketResult"
+      required: [tickets]
+
+    MyTicketDto:
+      type: object
+      description: The calling customer's own ticket position in the queue
+      properties:
+        ticketId:
+          type: string
+          format: uuid
+        number:
+          type: integer
+        displayNumber:
+          type: string
+          description: Formatted number with shift prefix (e.g. "A010")
+        status:
+          type: string
+          enum: [Waiting, Serving, Completed, Skipped, Cancelled]
+        aheadCount:
+          type: integer
+          description: Number of tickets ahead in the queue
+        estimatedWaitMinutes:
+          type: integer
+        estimatedServeTime:
+          type: string
+          format: date-time
+      required: [ticketId, number, displayNumber, status, aheadCount, estimatedWaitMinutes, estimatedServeTime]
+
+    RoomStatusDto:
+      type: object
+      properties:
+        roomId:
+          type: string
+          format: uuid
+        roomSlug:
+          type: string
+        roomName:
+          type: string
+        serviceDate:
+          type: string
+          format: date
+        serviceMinutes:
+          type: integer
+        currentNumber:
+          type: integer
+          nullable: true
+          description: Currently serving ticket number (null if idle)
+        currentDisplayNumber:
+          type: string
+          nullable: true
+        nextNumber:
+          type: integer
+          nullable: true
+          description: Next ticket to be called (null if queue empty)
+        nextDisplayNumber:
+          type: string
+          nullable: true
+        nextToTakeNumber:
+          type: integer
+          description: The number that will be issued on the next take-ticket
+        nextToTakeDisplayNumber:
+          type: string
+        waitingCount:
+          type: integer
+        now:
+          type: string
+          format: date-time
+      required: [roomId, roomSlug, roomName, serviceDate, serviceMinutes, nextToTakeNumber, nextToTakeDisplayNumber, waitingCount, now]
+
+    RoomStatusResponse:
+      type: object
+      properties:
+        siteSlug:
+          type: string
+        roomSlug:
+          type: string
+        status:
+          $ref: "#/components/schemas/RoomStatusDto"
+        myTicket:
+          $ref: "#/components/schemas/MyTicketDto"
+          nullable: true
+      required: [siteSlug, roomSlug, status]
+
+    SiteStatusDto:
+      type: object
+      properties:
+        siteSlug:
+          type: string
+        now:
+          type: string
+          format: date-time
+        rooms:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoomStatusDto"
+      required: [siteSlug, now, rooms]
+
+    # ── Staff ─────────────────────────────────────────────────────────────
+
+    StaffLoginRequest:
+      type: object
+      properties:
+        phone:
+          type: string
+        password:
+          type: string
+          format: password
+      required: [phone, password]
+
+    StaffLoginResponse:
+      type: object
+      properties:
+        staffId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        token:
+          type: string
+          format: uuid
+          description: Same as staffId — use as Bearer token
+        siteSlug:
+          type: string
+        siteName:
+          type: string
+      required: [staffId, token, siteSlug, siteName]
+
+    StaffTicketDto:
+      type: object
+      properties:
+        ticketId:
+          type: string
+          format: uuid
+        number:
+          type: integer
+        displayNumber:
+          type: string
+        customerName:
+          type: string
+          nullable: true
+        roomSlug:
+          type: string
+        roomName:
+          type: string
+        status:
+          type: string
+          enum: [Waiting, Serving, Completed, Skipped, Cancelled]
+        createdAt:
+          type: string
+          format: date-time
+        calledAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        serviceMinutes:
+          type: integer
+      required: [ticketId, number, displayNumber, roomSlug, roomName, status, createdAt, serviceMinutes]
+
+    StaffTicketListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StaffTicketDto"
+        totalCount:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+      required: [items, totalCount, page, pageSize]
+
+    # ── Feedback ──────────────────────────────────────────────────────────
+
+    FeedbackRequest:
+      type: object
+      properties:
+        stars:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: string
+          nullable: true
+      required: [stars]
+
+    FeedbackResponse:
+      type: object
+      properties:
+        feedbackId:
+          type: string
+          format: uuid
+        ticketId:
+          type: string
+          format: uuid
+      required: [feedbackId, ticketId]
+
+    # ── QR Token / Session ────────────────────────────────────────────────
+
+    SiteQrTokenDto:
+      type: object
+      description: Current rotating QR token for a site
+      properties:
+        token:
+          type: string
+          description: Raw token string embedded in the QR code
+        qrUrl:
+          type: string
+          description: Full URL to embed in the QR code (points to frontend)
+        expiresAt:
+          type: string
+          format: date-time
+      required: [token, qrUrl, expiresAt]
+
+    VerifySiteTokenRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          description: The token extracted from the scanned QR URL
+      required: [token]
+
+    VerifySiteTokenResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        sessionToken:
+          type: string
+          nullable: true
+          description: Short-lived session token — pass as X-Session-Token header
+        siteSlug:
+          type: string
+          nullable: true
+        siteName:
+          type: string
+          nullable: true
+        errorMessage:
+          type: string
+          nullable: true
+      required: [success]
+
+    # ── Errors ────────────────────────────────────────────────────────────
+
+    SessionError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Phiên làm việc không hợp lệ. Vui lòng scan QR tại cơ sở."
+        code:
+          type: string
+          enum: [INVALID_SESSION, SITE_MISMATCH]
+      required: [error, code]
